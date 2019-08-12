@@ -1,0 +1,8 @@
+default:
+  warehouse:
+    driver: 'Postgres'
+    server: 'server_info'
+    uid: 'username'
+    pwd: 'password'
+    port: 5432
+    database: 'database_name'

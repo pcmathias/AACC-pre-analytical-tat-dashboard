@@ -1,0 +1,144 @@
+---
+title: "Blood Draw Time Intervals Dashboard"
+output: 
+  flexdashboard::flex_dashboard:
+    theme: bootstrap
+    orientation: columns
+    vertical_layout: fill
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(DBI)
+library(tidyverse)
+library(lubridate)
+library(plotly)
+```
+
+```{r connection}
+dw <- config::get("warehouse") # pull configuration data from config.yml file
+# open Postgres connection with database using config data from separate file
+con <- DBI::dbConnect(RPostgres::Postgres(),
+                      dbname = dw$datbase,
+                      host = dw$server,
+                      port = dw$port,
+                      user = dw$uid,
+                      password = dw$pwd
+                      )
+# connect to materialized view that contains pre analytical timestamps
+pre_ts <- tbl(con, "sq_pre_analytical_ts")
+```
+
+```{r prep_data}
+# pull out orders for only hospital blood draw locations and non cancelled orders
+# create columns to group on arbirary time scales and calculate intervals
+# note that dplyr commands are converted to SQL when connecting to the DB but support for lubridate is not built in, so data is pulled locally before time manipulations
+ord <- pre_ts %>%
+  mutate(hospital_blood_draw_flag = ifelse(str_detect(ord_lab_loc_code, "BD"), 
+                                           TRUE, FALSE)) %>%
+  filter(hospital_blood_draw_flag == TRUE, cancel_flag == FALSE) %>%
+  select(-c(pat_id, pidx)) %>%
+  collect() %>%
+  mutate(received_month = floor_date(in_lab_ts, unit = "month"),
+         received_week = floor_date(in_lab_ts, unit = "week"),
+         received_hour = hour(in_lab_ts),
+         received_day = wday(in_lab_ts, label = TRUE),
+         label_to_collect = as.numeric(difftime(collected_ts, order_ts, units = "mins")),
+         collect_to_lab = as.numeric(difftime(in_lab_ts, collected_ts, units = "mins")),
+         lab_to_lis = as.numeric(difftime(lis_received_ts, in_lab_ts, units = "mins")),
+         label_to_lis = as.numeric(difftime(lis_received_ts, order_ts, units = "mins")),
+         collect_to_lis = as.numeric(difftime(lis_received_ts, collected_ts, units = "mins")))
+```
+
+Last Week's Metrics
+=====================================
+
+Column {data-width=500 .tabset}
+-----------------------------------------------------------------------
+
+### Last Week's Order Volumes by Hour
+
+```{r}
+max_received_week <- max(ord$received_week, na.rm = TRUE) # latest week in the dataset
+# pull data during business hours for last week
+bus_hrs_dist <- ord %>%
+  filter(received_hour >= 7, received_hour < 18, ord_lab_loc_code != 'BDH') %>%
+  filter(received_week > max_received_week - duration(2, units = "weeks"),
+         received_week < max_received_week)
+bus_hrs_dist_plot <- ggplot(bus_hrs_dist) +
+  geom_histogram(aes(x = received_hour), binwidth = 1) +
+  facet_grid(received_day ~ .) +
+  ylab("Number of Orders\n") +
+  xlab("Hour Received in Lab")
+ggplotly(bus_hrs_dist_plot)
+```
+
+### Last Week's Sample Volumes by Hour
+
+```{r}
+# counting samples requires grouping at accession level
+bus_hrs_sample_dist <- ord %>%
+  filter(received_hour >= 7, received_hour < 18, ord_lab_loc_code != 'BDH') %>%
+  filter(received_week > max_received_week - duration(2, units = "weeks"),
+         received_week < max_received_week) %>%
+  group_by(acc_num, received_day, received_hour) %>%
+  summarize(num_orders = n())
+bus_hrs_sample_dist_plot <- ggplot(bus_hrs_sample_dist) +
+  geom_histogram(aes(x = received_hour), binwidth = 1) +
+  facet_grid(received_day ~ .) +
+  ylab("Number of Samples\n") +
+  xlab("Hour Received in Lab")
+ggplotly(bus_hrs_sample_dist_plot)
+```
+
+Column {data-width=500}
+-----------------------------------------------------------------------
+
+### Last Week's Collection to LIS Receipt Intervals
+
+```{r}
+bus_hrs_tat <- ord %>%
+  filter(received_hour >= 7, received_hour < 18, ord_lab_loc_code != 'BDH') %>%
+  filter(received_week > max_received_week - duration(2, units = "weeks"),
+         received_week < max_received_week) %>%
+  group_by(received_day, received_hour) %>%
+  summarize(median_pre_tat = median(collect_to_lis),
+            ninetieth_pre_tat = quantile(collect_to_lis, probs = 0.9, na.rm = TRUE))
+bus_hrs_tat_plot <- ggplot(bus_hrs_tat, aes(x = received_hour, y = ninetieth_pre_tat)) +
+  geom_point() +
+  geom_line() +
+  facet_grid(received_day ~ .) +
+  xlab("Hour Received in Lab\n") +
+  ylab("90th Percentile Collect-to-LIS Interval") +
+  geom_hline(aes(yintercept = 60), color = "coral", linetype = "dashed")
+ggplotly(bus_hrs_tat_plot)
+  
+```
+
+Turnaround time metrics over time
+=====================================
+
+```{r}
+max_received_month <- max(ord$received_month, na.rm = TRUE)
+bus_hrs_tat_bymonth <- ord %>%
+  filter(received_hour >= 7, received_hour < 18, ord_lab_loc_code != 'BDH') %>%
+  filter(received_month > max_received_month - duration(1, units = "years"),
+         received_month < max_received_month) %>%
+  group_by(received_month, received_day, received_hour) %>%
+  summarize(median_pre_tat = median(collect_to_lis),
+            ninetieth_pre_tat = quantile(collect_to_lis, probs = 0.9, na.rm = TRUE)) %>%
+  filter(ninetieth_pre_tat < 500)
+bus_hrs_tat_bymonth_plot <- ggplot(bus_hrs_tat_bymonth, 
+                           aes(x = received_month, y = ninetieth_pre_tat)) +
+  geom_line() +
+  facet_grid(received_day ~ received_hour, scales = "free") +
+  xlab("90th Percentile Collect-to-LIS Interval") +
+  ylab("Month") +
+  geom_hline(aes(yintercept = 60), color = "coral", linetype = "dashed") +
+  theme(axis.text.x=element_blank())
+ggplotly(bus_hrs_tat_bymonth_plot)
+```
+
+```{r}
+dbDisconnect(con)
+```
