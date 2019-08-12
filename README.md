@@ -1,4 +1,4 @@
-# AACC-pre-analytical-tat-dashboard
+# Pre Analytical Turnaround Time Dashboard
 Presentation and code for pre-analytical turnaround time dashboard discussed in R workshop session at AACC 2019
 
 ## Code
